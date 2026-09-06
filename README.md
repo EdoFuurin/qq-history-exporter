@@ -56,6 +56,20 @@ qq-history-export --ntdb-dir .\ntdb --uin <你的QQ号> --peers 好友A 好友B 
    还原文字 / 图片 / 回复 / 转发占位等消息体；
 4. 按“会话 uid → 通讯录昵称”分文件，输出有序 Markdown 与 `_index.md`。
 
+## 测试（无需真实数据）
+
+仓库内置一套**合成假库**（`tests/data/ntdb/`，固定密钥 `FIXTUREKEY123456`，
+内容为“你好/收到”之类的假消息，不含任何真实数据）。运行：
+
+```bash
+pip install sqlcipher3 protobuf
+python tests/gen_fixture.py      # 可选：重新生成假库（已内置，通常无需）
+python -m unittest discover -s tests -v
+```
+
+测试覆盖：CLI 端到端导出（含 protobuf 文本解析、无正文占位、我/对方归属）、
+`_index.md` 生成、`--peers` 过滤、文件名安全化与时间格式化。
+
 ## 已知边界 / Roadmap
 
 - v0.2：**私聊（C2C）全量**导出；**群聊导出计划在 v0.3**；

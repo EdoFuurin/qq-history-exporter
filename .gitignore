@@ -13,6 +13,7 @@ ntdb/
 out/
 test_out/
 _strip/
+tests/_out/
 __pycache__/
 
 # 编辑器
