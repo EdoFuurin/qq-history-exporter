@@ -196,7 +196,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="QQNT 本地聊天记录导出器 v0.2（本人数据）")
     ap.add_argument("--ntdb-dir", help="QQNT nt_db 文件夹（含 nt_msg.db 等原始加密库）")
     ap.add_argument("--key", help="数据库密钥（或环境变量 NTQQ_DB_KEY）")
-    ap.add_argument("--uin", help="本机账号 QQ 号，如 2876859761")
+    ap.add_argument("--uin", help="本机账号 QQ 号（用于识别'我'），如 10001")
     ap.add_argument("--out", default=".", help="输出目录")
     ap.add_argument("--peers", nargs="*", default=[], help="可选过滤：昵称/uid 片段")
     args = ap.parse_args(argv)

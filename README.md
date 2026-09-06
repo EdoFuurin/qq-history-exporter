@@ -13,14 +13,15 @@
 
 ```
 chats/
-├── _index.md                    # 总索引：网名 | 条数 | 时间范围
-├── buddy_⭐一个普通的魔法使⭐.md # 私聊全文（文字/图片/回复/转发占位，按时间排序）
-└── buddy_六谷.md
+├── _index.md              # 总索引：网名 | 条数 | 时间范围
+├── buddy_好友A.md         # 私聊全文（文字/图片/回复/转发占位，按时间排序）
+└── buddy_好友B.md
 ```
 
-之后在你的 AI 工作区里问：
+> 文件名 = 通讯录里的备注名/昵称（已自动安全化）。之后在你的 AI 工作区里问：
 
-> “读取 chats/ 下与「六谷」的聊天记录，分析他说的有没有道理，时间范围 2026-09-02 ~ 09-03”
+> “读取 chats/ 下与「好友A」的聊天记录（先看 _index.md 找到对应文件），
+> 分析这段对话说了什么，时间范围以文件内为准。”
 
 ## 环境与依赖
 
@@ -41,10 +42,10 @@ pip install -e .
 qq-history-export --ntdb-dir .\ntdb --uin <你的QQ号> --out .
 ```
 
-只导出部分人（昵称/uid 片段匹配）：
+只导出部分好友（备注名/昵称/uid 片段匹配，支持多个）：
 
 ```bash
-qq-history-export --ntdb-dir .\ntdb --uin <QQ号> --peers 六谷 魔法使 --out .
+qq-history-export --ntdb-dir .\ntdb --uin <你的QQ号> --peers 好友A 好友B --out .
 ```
 
 ## 实现原理（简要）
