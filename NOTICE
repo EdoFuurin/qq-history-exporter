@@ -1,0 +1,15 @@
+qq-history-exporter
+
+本项目以 GNU General Public License v3.0 发布（LICENSE 全文见：
+https://www.gnu.org/licenses/gpl-3.0.html）。
+
+内置的 `src/msgdb` 消息解析层（含 protobuf schema 与解析器）来自上游开源项目
+  QQBackup/nt_msg_db_util  https://github.com/QQBackup/nt_msg_db_util
+其 LICENSE（GPL-3.0）随附于本仓库 GPL-3.0-LICENSE.txt。
+
+依赖：
+  - sqlcipher3     https://pypi.org/project/sqlcipher3/
+  - protobuf       https://pypi.org/project/protobuf/
+
+密钥提取参考（不内置其代码）：
+  QQBackup/qq-win-db-key   https://github.com/QQBackup/qq-win-db-key

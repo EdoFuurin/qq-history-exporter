@@ -1,19 +1,28 @@
-"""QQNT 本地聊天记录导出器（仅限本人账号，仅供学习研究）。
+"""QQNT 本地聊天记录导出器 v0.2（仅限本人账号，仅供学习研究）。
 
-设计目标：
-  1. 输入：本机 QQNT 数据目录（nt_db 文件夹，内含 nt_msg.db 等原始加密库）与解密密钥。
-  2. 输出：chats/<对话>/ 下按时间排序的 Markdown + chats/_index.md 总索引，
-     让任何 AI 工作区（如 DeepSeek Harness / Claude / 本地 agent）能直接检索分析。
+v0.2 变化：
+  - 私聊(C2C)改为**全量导出**：直接解析 nt_msg.db 的 c2c_msg_table，
+    通过内置 msgdb（上游 GPL-3.0 解析层，见 NOTICE）还原文字/图片/回复/转发等，
+    输出仍为按时间排序、可供 AI 检索的 Markdown；
+  - 群聊沿用 v0.1 的 FTS 文本索引（文字类消息）。
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import io
+import json
 import os
 import re
+import shutil
 import sys
-import tempfile
+
+C2C_COLS = ["msg_id", "timestamp", "direction", "sender_uid", "sender_qq",
+            "peer_uid", "peer_qq", "msg_type", "blob"]
+
+C2C_SQL = """SELECT "40001" AS msg_id, "40050" AS timestamp, "40013" AS direction,
+"40020" AS sender_uid, "40033" AS sender_qq, "40021" AS peer_uid, "40030" AS peer_qq,
+"40011" AS msg_type, "40800" AS blob FROM c2c_msg_table"""
 
 
 def strip_header(src: str, dst: str, header: int = 1024) -> None:
@@ -49,18 +58,17 @@ def fmt_ts(v):
         return str(v)
 
 
-# ---------------------------------------------------------------------------
-# 通讯录：uid -> 昵称 / 本人 uid
-# ---------------------------------------------------------------------------
-def load_profile(stripped_dir: str, key: str, my_uin: str | int | None):
-    """返回 (uid2nick, my_uid)。profile_info_v6: 1000=uid 1002=QQ号 20002=昵称。"""
-    import sqlcipher3.dbapi2 as sc
+def safe_name(name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]', "_", name)[:60]
 
-    path = os.path.join(stripped_dir, "profile_info.db")
+
+def load_profile(stripped_dir: str, key: str, my_uin: str | int | None):
+    """(uid2nick, my_uid)；profile_info_v6: 1000=uid, 1002=QQ号, 20002=昵称。"""
     uid2nick, my_uid = {}, None
-    if not os.path.exists(path):
+    p = os.path.join(stripped_dir, "profile_info.db")
+    if not os.path.exists(p):
         return uid2nick, my_uid
-    con = open_keyed(path, key)
+    con = open_keyed(p, key)
     cols = table_cols(con, "profile_info_v6")
     try:
         rows = con.execute("SELECT * FROM profile_info_v6").fetchall()
@@ -68,96 +76,140 @@ def load_profile(stripped_dir: str, key: str, my_uin: str | int | None):
         con.close()
     for r in rows:
         d = dict(zip(cols, r))
-        uid = d.get("1000")
+        uid = str(d.get("1000") or "")
         if not uid:
             continue
-        nick = d.get("20002") or str(d.get("1002") or "") or str(uid)
+        nick = d.get("20002") or str(d.get("1002") or "") or uid
         if isinstance(nick, bytes):
             nick = nick.decode("utf-8", "ignore")
-        uid2nick[str(uid)] = str(nick)
+        uid2nick[uid] = str(nick)
         if my_uin is not None and str(d.get("1002")) == str(my_uin):
-            my_uid = str(uid)
+            my_uid = uid
     return uid2nick, my_uid
 
 
 # ---------------------------------------------------------------------------
-# FTS 内容表：文本消息（无需 protobuf 解析，v0.1 的主力来源）
+# 渲染单条消息（msgdb 解析后的 Message）
 # ---------------------------------------------------------------------------
-def export_fts(dbfile: str, label: str, key: str, uid2nick: dict, my_uid: str | None,
-               out_dir: str, index: io.TextIOWrapper, peers_filter: list[str]):
-    con = open_keyed(dbfile, key)
+def render(m, has_sender: bool = True) -> str:
+    if m.text:
+        return m.text
+    c = m.content
+    if c is None:
+        return ""
+    tag = type(c).__name__.lower().replace("content", "")
+    if tag == "text":
+        return getattr(c, "text", "") or ""
+    if tag == "image":
+        fn = getattr(c, "filename", "") or ""
+        loc = getattr(c, "local_path", None) or ""
+        return "[图片 %s]%s" % (fn, (" 本地:%s" % loc) if loc else "")
+    if tag == "video":
+        return "[视频 %s]" % (getattr(c, "filename", "") or "")
+    if tag == "file":
+        return "[文件 %s]" % (getattr(c, "filename", "") or "")
+    if tag == "sticker":
+        fb = getattr(c, "text_fallback", None)
+        return "[表情]" + (fb or "")
+    if tag == "reply":
+        s = ""
+        if getattr(c, "ref_summary", None):
+            s += "回复「%s」" % c.ref_summary
+        if getattr(c, "text", None):
+            s += c.text
+        return s or "[回复消息]"
+    if tag == "contact":
+        return "[名片 %s]" % (getattr(c, "nickname", "") or getattr(c, "uid", ""))
+    if tag == "call":
+        return "[通话 %s %s秒]" % (getattr(c, "desc", "") or "", getattr(c, "duration", ""))
+    if tag == "sys":
+        return "[系统 %s]" % (getattr(c, "content", None) or "")
+    if tag == "mixed":
+        parts = []
+        for seg in getattr(c, "segments", []) or []:
+            if seg.get("type") == "text":
+                parts.append(seg.get("text", ""))
+            else:
+                parts.append("[%s]" % seg.get("type"))
+        return " ".join(parts)
+    if tag in ("forward", "legacyforward"):
+        xml = getattr(c, "xml", "") or json.dumps(getattr(c, "meta", {}), ensure_ascii=False)
+        n = re.search(r'tSum="(\d+)"', xml)
+        t = re.search(r"<title[^>]*>([^<]+)</title>", xml)
+        return "[转发聊天记录 %s条]%s" % (n.group(1) if n else "?", (" 「" + t.group(1) + "」") if t else "")
+    return "[%s]" % tag
+
+
+# ---------------------------------------------------------------------------
+# 私聊全量导出（C2C）
+# ---------------------------------------------------------------------------
+def export_c2c(nt_msg_clear: str, key: str, uid2nick: dict, my_uid: str | None,
+               my_uin: str | int | None, out_dir: str, index: io.TextIOWrapper,
+               peers_filter: list[str]):
+    from msgdb.c2c.parser import parse_row  # 内置 msgdb（GPL-3.0）
+
+    con = open_keyed(nt_msg_clear, key)
     try:
-        base = "buddy_msg_fts" if "buddy" in label else "group_msg_fts"
-        cols = table_cols(con, base)
-        rows = con.execute('SELECT * FROM "%s"' % base).fetchall()
+        rows = con.execute(C2C_SQL).fetchall()
     finally:
         con.close()
 
     peers = {}
-    for r in rows:
-        d = dict(zip(cols, r))
-        text = d.get("41701")
-        if not text:
+    for tup in rows:
+        rd = dict(zip(C2C_COLS, tup))
+        try:
+            m = parse_row(rd)
+        except Exception:
             continue
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", "ignore")
-        ts = d.get("40050")
-        # 单聊：40020=发送方 uid，40021=会话对方 uid；群聊：40021=群号
-        sender = str(d.get("40020") or "")
-        peer = str(d.get("40021") or "")
-        if label == "buddy":
-            if peer not in uid2nick and sender not in uid2nick:
-                continue
-            key_peer = peer if peer in uid2nick else sender
-        else:
-            key_peer = peer or str(d.get("40027") or "")
-            if not key_peer:
-                continue
-        if peers_filter and not any(f in key_peer or f in uid2nick.get(key_peer, "") for f in peers_filter):
+        peer = str(m.peer_uid or "")
+        if peer not in uid2nick:
+            continue  # 只导通讯录里认识的人
+        if peers_filter and not any(f in peer or f in uid2nick[peer] for f in peers_filter):
             continue
-        peers.setdefault(key_peer, []).append((ts, sender, text))
+        peers.setdefault(peer, []).append(m)
 
     for peer, msgs in sorted(peers.items(), key=lambda kv: -len(kv[1])):
-        msgs.sort(key=lambda x: (int(x[0]) if x[0] else 0))
-        name = uid2nick.get(peer, peer if label == "group" else ("好友" + peer[:8]))
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name)[:60]
-        od = os.path.join(out_dir, "chats")
-        os.makedirs(od, exist_ok=True)
-        path = os.path.join(od, "%s_%s.md" % (label, safe))
-        lines = []
-        lines.append("# 与「%s」的聊天记录（%s）\n" % (name, label))
-        lines.append("- 对方标识: %s\n- 消息数: %d\n" % (peer, len(msgs)))
-        t0 = msgs[0][0] if msgs else 0
-        t1 = msgs[-1][0] if msgs else 0
-        lines.append("- 时间范围: %s ~ %s\n" % (fmt_ts(t0), fmt_ts(t1)))
-        lines.append("\n")
-        for ts, sender, text in msgs:
-            who = "我" if my_uid and sender == my_uid else "对方"
-            lines.append("[%s] %s: %s\n" % (fmt_ts(ts), who, str(text).replace("\n", " ")))
+        msgs.sort(key=lambda m: (m.timestamp or 0, m.msg_id or 0))
+        name = uid2nick.get(peer, peer)
+        path = os.path.join(out_dir, "chats", "buddy_%s.md" % safe_name(name))
+        out = []
+        out.append("# 与「%s」的聊天记录\n" % name)
+        out.append("- 对方标识: %s\n- 消息数: %d\n" % (peer, len(msgs)))
+        if msgs:
+            out.append("- 时间范围: %s ~ %s\n" % (fmt_ts(msgs[0].timestamp), fmt_ts(msgs[-1].timestamp)))
+        out.append("\n")
+        for m in msgs:
+            is_me = (m.sender_qq == my_uin) or (m.sender_uid == my_uid) or m.direction in (1, 2)
+            who = "我" if is_me else "对方"
+            body = render(m)
+            if not body:
+                body = "[（无文本，msg_type=%s）]" % m.msg_type
+            out.append("[%s] %s: %s\n" % (fmt_ts(m.timestamp), who, body.replace("\n", " ")))
         with io.open(path, "w", encoding="utf-8") as f:
-            f.write("".join(lines))
-        index.write("- [%s](%s) ｜ %d 条 ｜ %s ~ %s\n" % (
-            name, os.path.basename(path), len(msgs), fmt_ts(t0), fmt_ts(t1)))
+            f.write("".join(out))
+        index.write("- 单聊「%s」: %d 条 ｜ %s ~ %s ｜ 文件 buddy_%s.md\n" % (
+            name, len(msgs), fmt_ts(msgs[0].timestamp) if msgs else "-",
+            fmt_ts(msgs[-1].timestamp) if msgs else "-", safe_name(name)))
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="QQNT 本地聊天记录导出器（本人数据）")
+    ap = argparse.ArgumentParser(description="QQNT 本地聊天记录导出器 v0.2（本人数据）")
     ap.add_argument("--ntdb-dir", help="QQNT nt_db 文件夹（含 nt_msg.db 等原始加密库）")
-    ap.add_argument("--key", help="数据库密钥（也可用环境变量 NTQQ_DB_KEY）")
-    ap.add_argument("--uin", help="本机账号 QQ 号（用于识别'我'），如 2876859761")
-    ap.add_argument("--out", default=".", help="输出目录（默认当前目录）")
-    ap.add_argument("--peers", nargs="*", default=[], help="可选过滤：昵称/群号片段")
+    ap.add_argument("--key", help="数据库密钥（或环境变量 NTQQ_DB_KEY）")
+    ap.add_argument("--uin", help="本机账号 QQ 号，如 2876859761")
+    ap.add_argument("--out", default=".", help="输出目录")
+    ap.add_argument("--peers", nargs="*", default=[], help="可选过滤：昵称/uid 片段")
     args = ap.parse_args(argv)
 
     key = args.key or os.environ.get("NTQQ_DB_KEY", "")
     if not key:
         sys.exit("缺少密钥：--key 或环境变量 NTQQ_DB_KEY（可先用 qq-win-db-key 提取）")
     if not args.ntdb_dir or not os.path.isdir(args.ntdb_dir):
-        sys.exit("请指定 --ntdb-dir（QQ 未运行时复制 nt_db 文件夹，或用工具自带拷贝）")
+        sys.exit("请指定 --ntdb-dir（建议退出 QQ 后复制 nt_db 目录）")
 
     out_abs = os.path.abspath(args.out)
-    os.makedirs(os.path.join(out_abs, "chats"), exist_ok=True)
     stripped = os.path.join(out_abs, "_strip")
+    os.makedirs(os.path.join(out_abs, "chats"), exist_ok=True)
     os.makedirs(stripped, exist_ok=True)
     try:
         for fn in os.listdir(args.ntdb_dir):
@@ -166,15 +218,12 @@ def main(argv=None):
 
         uid2nick, my_uid = load_profile(stripped, key, args.uin)
         with io.open(os.path.join(out_abs, "chats", "_index.md"), "w", encoding="utf-8") as idx:
-            idx.write("# 聊天记录索引\n\n你可以在下面文件中检索对话；提问时带上时间范围与网名。\n\n")
-            for db, label in [("buddy_msg_fts.db", "buddy"), ("group_msg_fts.db", "group")]:
-                p = os.path.join(stripped, db)
-                if os.path.exists(p):
-                    export_fts(p, label, key, uid2nick, my_uid, out_abs, idx, args.peers)
+            idx.write("# 聊天记录索引\n\n提问时请带上“网名/群名”与“时间范围”。\n\n")
+            nmsg = os.path.join(stripped, "nt_msg.db")
+            if os.path.exists(nmsg):
+                export_c2c(nmsg, key, uid2nick, my_uid, args.uin, out_abs, idx, args.peers)
         print("导出完成 ->", os.path.join(out_abs, "chats"))
     finally:
-        import shutil
-
         shutil.rmtree(stripped, ignore_errors=True)
 
 

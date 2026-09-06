@@ -4,17 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qq-history-exporter"
-version = "0.1.0"
+version = "0.2.0"
 description = "导出 QQNT 本地聊天记录为按时间排序、可供 AI 检索的 Markdown（仅限本人账号数据）"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-or-later" }
 dependencies = [
     "sqlcipher3>=0.6.2",
+    "protobuf>=5.26",
 ]
-
-[project.optional-dependencies]
-analysis = []  # 不做内置 AI 分析；把导出的 chats/ 目录交给 AI 工作区即可
 
 [project.scripts]
 qq-history-export = "qqhex.cli:main"
