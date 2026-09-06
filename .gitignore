@@ -1,0 +1,20 @@
+# 隐私与构建产物 —— 一律不进仓库
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# 密钥与聊天明文
+NTQQ_DB_KEY
+*.key
+chats/
+ntdb/
+out/
+test_out/
+_strip/
+__pycache__/
+
+# 编辑器
+.vscode/
+.idea/
