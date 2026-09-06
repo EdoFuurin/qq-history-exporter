@@ -10,6 +10,8 @@ NTQQ_DB_KEY
 *.key
 chats/
 ntdb/
+!tests/data/ntdb/
+!tests/data/ntdb/*.db
 out/
 test_out/
 _strip/
