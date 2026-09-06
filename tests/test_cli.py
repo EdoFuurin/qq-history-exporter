@@ -31,7 +31,9 @@ class TestUnits(unittest.TestCase):
 class TestExport(unittest.TestCase):
     def _export(self, peers):
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_out")
-        out = os.path.join(base, "run_%d" % len(os.listdir(base)) if os.path.isdir(base) else 0)
+        os.makedirs(base, exist_ok=True)
+        n = sum(1 for x in os.listdir(base) if x.startswith("run_"))
+        out = os.path.join(base, "run_%d" % n)
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         args = ["--ntdb-dir", FIXTURE, "--key", KEY, "--uin", "10001",
                 "--out", out] + (["--peers"] + peers if peers else [])
